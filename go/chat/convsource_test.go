@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/keybase/client/go/chat/globals"
+	"github.com/keybase/client/go/chat/storage"
 	"github.com/keybase/client/go/chat/types"
 	"github.com/keybase/client/go/kbtest"
 	"github.com/keybase/client/go/libkb"
@@ -177,8 +179,10 @@ func TestExplodeNow(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Logf("basic test")
+	lifetime := gregor1.DurationSec(30)
+	lifetimeDuration := time.Second * time.Duration(lifetime)
 	ephemeralMetadata := chat1.MsgEphemeralMetadata{
-		Lifetime: 30,
+		Lifetime: lifetime,
 	}
 	_, msgBoxed, err := sender.Send(ctx, res.ConvID, chat1.MessagePlaintext{
 		ClientHeader: chat1.MessageClientHeader{
@@ -250,12 +254,13 @@ func TestExplodeNow(t *testing.T) {
 	delSupersedes := msgID
 	_, deleteMsgBoxed, err := sender.Send(ctx, res.ConvID, chat1.MessagePlaintext{
 		ClientHeader: chat1.MessageClientHeader{
-			Conv:        trip,
-			Sender:      u.User.GetUID().ToBytes(),
-			TlfName:     u.Username,
-			TlfPublic:   false,
-			MessageType: chat1.MessageType_DELETE,
-			Supersedes:  delSupersedes,
+			Conv:              trip,
+			Sender:            u.User.GetUID().ToBytes(),
+			TlfName:           u.Username,
+			TlfPublic:         false,
+			MessageType:       chat1.MessageType_DELETE,
+			Supersedes:        delSupersedes,
+			EphemeralMetadata: &ephemeralMetadata,
 		},
 		MessageBody: delBody,
 	}, 0, nil)
@@ -278,6 +283,28 @@ func TestExplodeNow(t *testing.T) {
 	// This is true since we did an explode now!
 	require.True(t, msg3.Valid().IsEphemeralExpired(time.Now()))
 	require.Equal(t, u.Username, *msg3.Valid().ExplodedBy())
+
+	// ensure the DELETE sticks around after a purge
+	g := globals.NewContext(tc.G, tc.ChatG)
+	chatStorage := storage.New(g, nil)
+	chatStorage.SetClock(world.Fc)
+	world.Fc.Advance(lifetimeDuration)
+	_, _, err = chatStorage.EphemeralPurge(context.Background(), res.ConvID, u.User.GetUID().ToBytes(), &chat1.EphemeralPurgeInfo{})
+	require.NoError(t, err)
+
+	thread, err = tc.ChatG.ConvSource.Pull(ctx, res.ConvID, u.User.GetUID().ToBytes(),
+		&chat1.GetThreadQuery{
+			MessageTypes: []chat1.MessageType{chat1.MessageType_DELETE},
+		}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(thread.Messages), "wrong length")
+	msg4 := thread.Messages[0]
+	require.Equal(t, deleteMsgID, msg4.GetMessageID(), "wrong msgID")
+	require.True(t, msg4.Valid().IsEphemeral())
+	// The message is expired but we don't explode it since we need the body to
+	// apply supersedes
+	require.True(t, msg4.Valid().IsEphemeralExpired(world.Fc.Now()))
+	require.Equal(t, delBody, msg4.Valid().MessageBody, "wrong body")
 }
 
 type failingRemote struct {
